@@ -162,12 +162,112 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
   var record = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
   var closest = record;
 
+  // Check spheres
+  for (var i = 0; i < spheresCount; i = i + 1)
+  {
+    var s = spheresb[i];
+    var temp = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
+    hit_sphere(s.transform.xyz, s.transform.w, r, &temp, max);
+    if (temp.hit_anything && temp.t < closest.t)
+    {
+      closest.t = temp.t;
+      closest.p = temp.p;
+      closest.normal = temp.normal;
+      closest.object_color = s.color;
+      closest.object_material = s.material;
+      closest.frontface = temp.frontface;
+      closest.hit_anything = true;
+    }
+  }
+
+  // Check quads
+  for (var qi = 0; qi < quadsCount; qi = qi + 1)
+  {
+    var q = quadsb[qi];
+    var tempq = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
+    hit_quad(r, q.Q, q.u, q.v, &tempq, max);
+    if (tempq.hit_anything && tempq.t < closest.t)
+    {
+      // set frontface based on ray direction
+      tempq.frontface = dot(r.direction, tempq.normal) < 0.0;
+      closest.t = tempq.t;
+      closest.p = tempq.p;
+      closest.normal = tempq.normal;
+      closest.object_color = q.color;
+      closest.object_material = q.material;
+      closest.frontface = tempq.frontface;
+      closest.hit_anything = true;
+    }
+  }
+
+  // Check boxes
+  for (var bi = 0; bi < boxesCount; bi = bi + 1)
+  {
+    var b = boxesb[bi];
+    var tempb = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
+    hit_box(r, b.center.xyz, b.radius.xyz, &tempb, max);
+    if (tempb.hit_anything && tempb.t < closest.t)
+    {
+      tempb.frontface = dot(r.direction, tempb.normal) < 0.0;
+      closest.t = tempb.t;
+      closest.p = tempb.p;
+      closest.normal = tempb.normal;
+      closest.object_color = b.color;
+      closest.object_material = b.material;
+      closest.frontface = tempb.frontface;
+      closest.hit_anything = true;
+    }
+  }
+
+  // Check standalone triangles
+  for (var ti = 0; ti < trianglesCount; ti = ti + 1)
+  {
+    var t = trianglesb[ti];
+    var tempt = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
+    hit_triangle(r, t.v0.xyz, t.v1.xyz, t.v2.xyz, &tempt, max);
+    if (tempt.hit_anything && tempt.t < closest.t)
+    {
+      tempt.frontface = dot(r.direction, tempt.normal) < 0.0;
+
+      // Determine if this triangle belongs to a mesh; if so, use mesh color/material
+      var triColor = vec4f(1.0, 1.0, 1.0, 1.0);
+      var triMaterial = vec4f(0.0, 0.0, 0.0, 0.0);
+      for (var mi = 0; mi < meshCount; mi = mi + 1)
+      {
+        var m = meshb[mi];
+        var starti = i32(m.start);
+        var endi = i32(m.end);
+        if (ti >= starti && ti < endi)
+        {
+          triColor = m.color;
+          triMaterial = m.material;
+          break;
+        }
+      }
+
+      closest.t = tempt.t;
+      closest.p = tempt.p;
+      closest.normal = tempt.normal;
+      closest.object_color = triColor;
+      closest.object_material = triMaterial;
+      closest.frontface = tempt.frontface;
+      closest.hit_anything = true;
+    }
+  }
+
   return closest;
 }
 
 fn lambertian(normal : vec3f, absorption: f32, random_sphere: vec3f, rng_state: ptr<function, u32>) -> material_behaviour
 {
-  return material_behaviour(true, vec3f(0.0));
+  // Cosine-weighted-ish Lambertian: normal + random unit-sphere sample
+  var rnd = rng_next_vec3_in_unit_sphere(rng_state);
+  var scatter = normal + rnd;
+  if (length(scatter) < 1e-6)
+  {
+    scatter = normal;
+  }
+  return material_behaviour(true, normalize(scatter));
 }
 
 fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> material_behaviour
@@ -189,16 +289,42 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
 {
   var maxbounces = i32(uniforms[2]);
   var light = vec3f(0.0);
-  var color = vec3f(1.0);
+  var attenuation = vec3f(1.0);
   var r_ = r;
-  
+
   var backgroundcolor1 = int_to_rgb(i32(uniforms[11]));
   var backgroundcolor2 = int_to_rgb(i32(uniforms[12]));
-  var behaviour = material_behaviour(true, vec3f(0.0));
 
+  // Simple path tracer: lambertian bounces without complex materials
   for (var j = 0; j < maxbounces; j = j + 1)
   {
+    var rec = check_ray_collision(r_, RAY_TMAX);
 
+    if (!rec.hit_anything)
+    {
+      // Hit the environment
+      light = light + attenuation * envoriment_color(r_.direction, backgroundcolor1, backgroundcolor2);
+      break;
+    }
+
+    // Use object color as albedo
+    var albedo = rec.object_color.xyz;
+
+    // No emission support implemented in materials: assume none
+    // Accumulate nothing for emission here
+
+    // Update attenuation
+    attenuation = attenuation * albedo;
+
+    // Scatter ray: cosine-weighted approximate by normal + random in unit sphere
+    var scatter_dir = rec.normal + rng_next_vec3_in_unit_sphere(rng_state);
+    // Catch degenerate scatter direction
+    if (length(scatter_dir) < 1e-6)
+    {
+      scatter_dir = rec.normal;
+    }
+
+    r_ = ray(rec.p + rec.normal * RAY_TMIN, normalize(scatter_dir));
   }
 
   return light;
@@ -213,33 +339,44 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     // init_rng (random number generator) we pass the pixel position, resolution and frame
     var rng_state = init_rng(vec2(id.x, id.y), vec2(u32(rez)), time);
 
-    // Get uv
-    var fragCoord = vec2f(f32(id.x), f32(id.y));
-    var uv = (fragCoord + sample_square(&rng_state)) / vec2(rez);
-
-    // Camera
-    var lookfrom = vec3(uniforms[7], uniforms[8], uniforms[9]);
+  // Get uv and camera
+  var fragCoord = vec2f(f32(id.x), f32(id.y));
+    
+  // Camera
+  var lookfrom = vec3(uniforms[7], uniforms[8], uniforms[9]);
     var lookat = vec3(uniforms[23], uniforms[24], uniforms[25]);
 
     // Get camera
     var cam = get_camera(lookfrom, lookat, vec3(0.0, 1.0, 0.0), uniforms[10], 1.0, uniforms[6], uniforms[5]);
     var samples_per_pixel = i32(uniforms[4]);
+    // Accumulate samples
+    var color_accum = vec3f(0.0);
+    for (var s = 0; s < samples_per_pixel; s = s + 1)
+    {
+      var uv = (fragCoord + sample_square(&rng_state)) / vec2(rez);
+      var r = get_ray(cam, uv, &rng_state);
+      var col = trace(r, &rng_state);
+      color_accum = color_accum + col;
+    }
 
-    var color = vec3(rng_next_float(&rng_state), rng_next_float(&rng_state), rng_next_float(&rng_state));
-
-    // Steps:
-    // 1. Loop for each sample per pixel
-    // 2. Get ray
-    // 3. Call trace function
-    // 4. Average the color
-
+    var color = color_accum / f32(max(1, samples_per_pixel));
     var color_out = vec4(linear_to_gamma(color), 1.0);
     var map_fb = mapfb(id.xy, rez);
     
-    // 5. Accumulate the color
+    // 5. Accumulate the color across frames if requested
     var should_accumulate = uniforms[3];
-
-    // Set the color to the framebuffer
-    rtfb[map_fb] = color_out;
-    fb[map_fb] = color_out;
+    if (should_accumulate > 0.5)
+    {
+      var prev = rtfb[map_fb].xyz;
+      var frame = f32(time);
+      var accum = prev * frame + color;
+      var avg = accum / (frame + 1.0);
+      rtfb[map_fb] = vec4f(avg, 1.0);
+      fb[map_fb] = vec4(linear_to_gamma(avg), 1.0);
+    }
+    else
+    {
+      rtfb[map_fb] = color_out;
+      fb[map_fb] = color_out;
+    }
 }

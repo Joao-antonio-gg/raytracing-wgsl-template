@@ -1,37 +1,48 @@
-fn hit_sphere(center: vec3f, radius: f32, r: ray, rec: ptr<function, hit_record>, max_t: f32) {
-    let oc = r.origin - center;
-    let a = dot(r.direction, r.direction);
-    let half_b = dot(oc, r.direction);
-    let c = dot(oc, oc) - radius * radius;
-    let discriminant = half_b * half_b - a * c;
-    if (discriminant <= 0.0) {
-        return;
+fn hit_sphere(center: vec3f, radius: f32, r: ray, record: ptr<function, hit_record>, max: f32)
+{
+
+  var oc = r.origin - center;
+  var a = dot(r.direction, r.direction);
+  var half_b = dot(oc, r.direction);
+  var c = dot(oc, oc) - radius * radius;
+
+  var discriminant = half_b * half_b - a * c;
+  if (discriminant < 0.0)
+  {
+    record.hit_anything = false;
+    return;
+  }
+
+  var sqrtd = sqrt(discriminant);
+
+  // Find the nearest root that lies in the acceptable range.
+  var root = (-half_b - sqrtd) / a;
+  if (root < RAY_TMIN || root > max)
+  {
+    root = (-half_b + sqrtd) / a;
+    if (root < RAY_TMIN || root > max)
+    {
+      record.hit_anything = false;
+      return;
     }
+  }
 
-    let sqrtd = sqrt(discriminant);
+  record.t = root;
+  record.p = ray_at(r, root);
 
-    // tenta a raiz menor primeiro
-    var root = (-half_b - sqrtd) / a;
-    if (root < RAY_TMIN || root > max_t) {
-        root = (-half_b + sqrtd) / a;
-        if (root < RAY_TMIN || root > max_t) {
-            return;
-        }
-    }
+  var outward_normal = (record.p - center) / radius;
+  if (dot(r.direction, outward_normal) > 0.0)
+  {
+    record.normal = -outward_normal;
+    record.frontface = false;
+  }
+  else
+  {
+    record.normal = outward_normal;
+    record.frontface = true;
+  }
 
-    (*rec).t = root;
-    (*rec).p = ray_at(r, root);
-
-    var outward_normal = ((*rec).p - center) / radius;
-    let front = dot(r.direction, outward_normal) < 0.0;
-    (*rec).normal = select(-outward_normal, outward_normal, front);
-    (*rec).frontface = front;
-    (*rec).hit_anything = true;
-
-    // Valores padrão; se quiser cores reais, atribua antes de chamar ou
-    // copie a cor/material do buffer de geometria após hit.
-    (*rec).object_color = vec4f(1.0, 1.0, 1.0, 1.0);
-    (*rec).object_material = vec4f(0.0, 0.0, 0.0, 0.0);
+  record.hit_anything = true;
 }
 
 fn hit_quad(r: ray, Q: vec4f, u: vec4f, v: vec4f, record: ptr<function, hit_record>, max: f32)
