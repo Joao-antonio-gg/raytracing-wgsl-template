@@ -106,6 +106,28 @@ fn ray_at(r: ray, t: f32) -> vec3f
   return r.origin + t * r.direction;
 }
 
+// Helpers for dielectric material (top-level: WGSL does not allow nested functions)
+fn schlick(cosine: f32, ref_idx: f32) -> f32 {
+  var r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+  r0 = r0 * r0;
+  return r0 + (1.0 - r0) * pow((1.0 - cosine), 5.0);
+}
+
+fn reflect(v: vec3f, n: vec3f) -> vec3f {
+  return v - 2.0 * dot(v, n) * n;
+}
+
+fn refract(uv: vec3f, n: vec3f, eta: f32) -> vec3f {
+  var cos_theta = min(dot(-uv, n), 1.0);
+  var r_out_perp = eta * (uv + cos_theta * n);
+  var k = 1.0 - dot(r_out_perp, r_out_perp);
+  var r_out_parallel = vec3f(0.0);
+  if (k > 0.0) {
+    r_out_parallel = -sqrt(k) * n;
+  }
+  return r_out_perp + r_out_parallel;
+}
+
 fn get_ray(cam: camera, uv: vec2f, rng_state: ptr<function, u32>) -> ray
 {
   var rd = cam.lens_radius * rng_next_vec3_in_unit_disk(rng_state);
@@ -260,8 +282,8 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
 
 fn lambertian(normal : vec3f, absorption: f32, random_sphere: vec3f, rng_state: ptr<function, u32>) -> material_behaviour
 {
-  // Cosine-weighted-ish Lambertian: normal + random unit-sphere sample
-  var rnd = rng_next_vec3_in_unit_sphere(rng_state);
+  // Cosine-weighted-ish Lambertian: normal + provided random unit-sphere sample
+  var rnd = random_sphere;
   var scatter = normal + rnd;
   if (length(scatter) < 1e-6)
   {
@@ -277,18 +299,34 @@ fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> m
   var reflected = dir - 2.0 * dot(dir, normal) * normal;
   // Apply fuzz (random_sphere should be in unit sphere)
   var scattered = reflected + fuzz * random_sphere;
-  if (dot(scattered, normal) > 0.0)
-  {
-    return material_behaviour(true, normalize(scattered));
-  }
-  return material_behaviour(false, vec3f(0.0));
+  return material_behaviour(true, scattered);
 }
 
 fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontface: bool, random_sphere: vec3f, fuzz: f32, rng_state: ptr<function, u32>) -> material_behaviour
-{  
-  return material_behaviour(false, vec3f(0.0));
-}
+{
+  var unit_direction = normalize(r_direction);
+  var etai_over_etat = 1.0 / refraction_index;
+  if (!frontface) {
+    etai_over_etat = refraction_index;
+  }
 
+  var cos_theta = min(dot(-unit_direction, normal), 1.0);
+  var sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+
+  var cannot_refract = etai_over_etat * sin_theta > 1.0;
+  var reflect_prob = schlick(cos_theta, etai_over_etat);
+
+  var scatter_dir = vec3f(0.0);
+  if (cannot_refract || rng_next_float(rng_state) < reflect_prob) {
+    scatter_dir = reflect(unit_direction, normal);
+    // apply small fuzz to reflection if requested
+    scatter_dir = normalize(scatter_dir + fuzz * random_sphere);
+  } else {
+    scatter_dir = refract(unit_direction, normal, etai_over_etat);
+  }
+
+  return material_behaviour(true, normalize(scatter_dir));
+}
 fn emmisive(color: vec3f, light: f32) -> material_behaviour
 {
   // Emissive objects do not scatter; they emit light.
@@ -318,10 +356,8 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
       break;
     }
 
-    // Use object color as albedo
-    var albedo = rec.object_color.xyz;
-
-    // If the object is emissive (material.w > 0), accumulate emission and stop
+    // If the object is emissive (local light), accumulate its emission and stop tracing this path
+    // Convention: object_material.w holds emission strength (0 = non-emissive)
     if (rec.object_material.w > 0.0)
     {
       var emission = rec.object_color.xyz * rec.object_material.w;
@@ -329,25 +365,20 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
       break;
     }
 
+    // Use object color as albedo
+    var albedo = rec.object_color.xyz;
+
     // Choose material behaviour based on object_material.x
     var random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
     var behaviour = material_behaviour(true, vec3f(0.0));
     // If material.x > 0.5 treat as metal (material.y = fuzz)
-    if (rec.object_material.x > 0.5)
-    {
-      var fuzz = rec.object_material.y;
-      behaviour = metal(rec.normal, r_.direction, fuzz, random_sphere);
-    }
-    else
-    {
-      behaviour = lambertian(rec.normal, rec.object_material.x, random_sphere, rng_state);
-    }
+    var fuzz = rec.object_material.y;
+    var specular = rec.object_material.z;
+    var metal_behaviour = metal(rec.normal, r_.direction, fuzz, random_sphere);
+    var lambertian_behaviour = lambertian(rec.normal, rec.object_material.x, random_sphere, rng_state);
 
-    if (!behaviour.scatter)
-    {
-      break;
-    }
-
+    behaviour.direction = mix(lambertian_behaviour.direction, metal_behaviour.direction,
+      rec.object_material.x * f32(specular > rng_next_float(rng_state)));
     // Update attenuation
     attenuation = attenuation * albedo;
 
@@ -394,29 +425,12 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     var should_accumulate = uniforms[3];
     if (should_accumulate > 0.5)
     {
-      // Ensure rtfb slot is initialized (avoid dividing by zero)
-      if (rtfb[map_fb].w <= 0.0)
-      {
-        rtfb[map_fb] = vec4f(0.0, 0.0, 0.0, 0.0);
-      }
-
-      // Accumulate rgb and sample count in .w using a temporary value
-      var prev = rtfb[map_fb];
-      if (prev.w <= 0.0)
-      {
-        prev = vec4f(0.0, 0.0, 0.0, 0.0);
-      }
-
-      var new_rgb = prev.xyz + color;
-      var new_w = prev.w + 1.0;
-      rtfb[map_fb] = vec4f(new_rgb, new_w);
-
-      var avg = new_rgb / new_w;
-      fb[map_fb] = vec4(linear_to_gamma(avg), 1.0);
+      rtfb[map_fb] += color_out;
+      fb[map_fb] = vec4(linear_to_gamma(rtfb[map_fb].xyz / rtfb[map_fb].w), 1.0);
     }
     else
     {
-      rtfb[map_fb] = vec4f(color, 1.0);
-      fb[map_fb] = vec4(linear_to_gamma(color), 1.0);
+      rtfb[map_fb] = color_out;
+      fb[map_fb] = vec4(linear_to_gamma(color_out.xyz), 1.0);
     }
 }
