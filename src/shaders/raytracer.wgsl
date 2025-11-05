@@ -359,24 +359,20 @@ fn render(@builtin(global_invocation_id) id : vec3u)
       color_accum = color_accum + col;
     }
 
-    var color = color_accum / f32(max(1, samples_per_pixel));
-    var color_out = vec4(linear_to_gamma(color), 1.0);
+    var color = color_accum / f32(samples_per_pixel);
+    var color_out = vec4(color, 1.0);
     var map_fb = mapfb(id.xy, rez);
     
     // 5. Accumulate the color across frames if requested
     var should_accumulate = uniforms[3];
     if (should_accumulate > 0.5)
     {
-      var prev = rtfb[map_fb].xyz;
-      var frame = f32(time);
-      var accum = prev * frame + color;
-      var avg = accum / (frame + 1.0);
-      rtfb[map_fb] = vec4f(avg, 1.0);
-      fb[map_fb] = vec4(linear_to_gamma(avg), 1.0);
+      rtfb[map_fb] += color_out;
+      fb[map_fb] = vec4(linear_to_gamma(rtfb[map_fb].xyz / rtfb[map_fb].w), 1.0);
     }
     else
     {
       rtfb[map_fb] = color_out;
-      fb[map_fb] = color_out;
+      fb[map_fb] = vec4(linear_to_gamma(color_out.xyz), 1.0);
     }
 }
