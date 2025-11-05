@@ -272,6 +272,15 @@ fn lambertian(normal : vec3f, absorption: f32, random_sphere: vec3f, rng_state: 
 
 fn metal(normal : vec3f, direction: vec3f, fuzz: f32, random_sphere: vec3f) -> material_behaviour
 {
+  // Reflect the incoming direction around the normal
+  var dir = normalize(direction);
+  var reflected = dir - 2.0 * dot(dir, normal) * normal;
+  // Apply fuzz (random_sphere should be in unit sphere)
+  var scattered = reflected + fuzz * random_sphere;
+  if (dot(scattered, normal) > 0.0)
+  {
+    return material_behaviour(true, normalize(scattered));
+  }
   return material_behaviour(false, vec3f(0.0));
 }
 
@@ -282,6 +291,8 @@ fn dielectric(normal : vec3f, r_direction: vec3f, refraction_index: f32, frontfa
 
 fn emmisive(color: vec3f, light: f32) -> material_behaviour
 {
+  // Emissive objects do not scatter; they emit light.
+  // The trace function reads object_color and material.w to accumulate emission.
   return material_behaviour(false, vec3f(0.0));
 }
 
@@ -310,21 +321,37 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
     // Use object color as albedo
     var albedo = rec.object_color.xyz;
 
-    // No emission support implemented in materials: assume none
-    // Accumulate nothing for emission here
+    // If the object is emissive (material.w > 0), accumulate emission and stop
+    if (rec.object_material.w > 0.0)
+    {
+      var emission = rec.object_color.xyz * rec.object_material.w;
+      light = light + attenuation * emission;
+      break;
+    }
+
+    // Choose material behaviour based on object_material.x
+    var random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
+    var behaviour = material_behaviour(true, vec3f(0.0));
+    // If material.x > 0.5 treat as metal (material.y = fuzz)
+    if (rec.object_material.x > 0.5)
+    {
+      var fuzz = rec.object_material.y;
+      behaviour = metal(rec.normal, r_.direction, fuzz, random_sphere);
+    }
+    else
+    {
+      behaviour = lambertian(rec.normal, rec.object_material.x, random_sphere, rng_state);
+    }
+
+    if (!behaviour.scatter)
+    {
+      break;
+    }
 
     // Update attenuation
     attenuation = attenuation * albedo;
 
-    // Scatter ray: cosine-weighted approximate by normal + random in unit sphere
-    var scatter_dir = rec.normal + rng_next_vec3_in_unit_sphere(rng_state);
-    // Catch degenerate scatter direction
-    if (length(scatter_dir) < 1e-6)
-    {
-      scatter_dir = rec.normal;
-    }
-
-    r_ = ray(rec.p + rec.normal * RAY_TMIN, normalize(scatter_dir));
+    r_ = ray(rec.p + rec.normal * RAY_TMIN, normalize(behaviour.direction));
   }
 
   return light;
@@ -367,12 +394,29 @@ fn render(@builtin(global_invocation_id) id : vec3u)
     var should_accumulate = uniforms[3];
     if (should_accumulate > 0.5)
     {
-      rtfb[map_fb] += color_out;
-      fb[map_fb] = vec4(linear_to_gamma(rtfb[map_fb].xyz / rtfb[map_fb].w), 1.0);
+      // Ensure rtfb slot is initialized (avoid dividing by zero)
+      if (rtfb[map_fb].w <= 0.0)
+      {
+        rtfb[map_fb] = vec4f(0.0, 0.0, 0.0, 0.0);
+      }
+
+      // Accumulate rgb and sample count in .w using a temporary value
+      var prev = rtfb[map_fb];
+      if (prev.w <= 0.0)
+      {
+        prev = vec4f(0.0, 0.0, 0.0, 0.0);
+      }
+
+      var new_rgb = prev.xyz + color;
+      var new_w = prev.w + 1.0;
+      rtfb[map_fb] = vec4f(new_rgb, new_w);
+
+      var avg = new_rgb / new_w;
+      fb[map_fb] = vec4(linear_to_gamma(avg), 1.0);
     }
     else
     {
-      rtfb[map_fb] = color_out;
-      fb[map_fb] = vec4(linear_to_gamma(color_out.xyz), 1.0);
+      rtfb[map_fb] = vec4f(color, 1.0);
+      fb[map_fb] = vec4(linear_to_gamma(color), 1.0);
     }
 }
