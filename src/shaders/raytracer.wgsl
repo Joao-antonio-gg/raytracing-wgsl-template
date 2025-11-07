@@ -241,30 +241,56 @@ fn check_ray_collision(r: ray, max: f32) -> hit_record
     }
   }
 
-  // Check standalone triangles
+  // Check triangles (standalone or belonging to meshes). If a triangle belongs to a mesh,
+  // transform its vertices by the mesh transform (translation + scale) so the mesh appears
+  // in the scene where the Mesh's transform/scale specify.
   for (var ti = 0; ti < trianglesCount; ti = ti + 1)
   {
     var t = trianglesb[ti];
+
+    // Find owning mesh (if any)
+    var owner = -1;
+    var meshTransform = vec3f(0.0);
+    var meshScale = vec3f(1.0);
+    for (var mi = 0; mi < meshCount; mi = mi + 1)
+    {
+      var m = meshb[mi];
+      var starti = i32(m.start);
+      var endi = i32(m.end);
+      if (ti >= starti && ti < endi)
+      {
+        owner = mi;
+        meshTransform = m.transform.xyz;
+        meshScale = m.scale.xyz;
+        break;
+      }
+    }
+
+    // Apply transform/scale if owned by a mesh
+    var v0 = t.v0.xyz;
+    var v1 = t.v1.xyz;
+    var v2 = t.v2.xyz;
+    if (owner >= 0)
+    {
+      v0 = meshTransform + meshScale * v0;
+      v1 = meshTransform + meshScale * v1;
+      v2 = meshTransform + meshScale * v2;
+    }
+
     var tempt = hit_record(RAY_TMAX, vec3f(0.0), vec3f(0.0), vec4f(0.0), vec4f(0.0), false, false);
-    hit_triangle(r, t.v0.xyz, t.v1.xyz, t.v2.xyz, &tempt, max);
+    hit_triangle(r, v0, v1, v2, &tempt, max);
     if (tempt.hit_anything && tempt.t < closest.t)
     {
       tempt.frontface = dot(r.direction, tempt.normal) < 0.0;
 
-      // Determine if this triangle belongs to a mesh; if so, use mesh color/material
+      // Determine color/material: if owned by mesh use mesh properties
       var triColor = vec4f(1.0, 1.0, 1.0, 1.0);
       var triMaterial = vec4f(0.0, 0.0, 0.0, 0.0);
-      for (var mi = 0; mi < meshCount; mi = mi + 1)
+      if (owner >= 0)
       {
-        var m = meshb[mi];
-        var starti = i32(m.start);
-        var endi = i32(m.end);
-        if (ti >= starti && ti < endi)
-        {
-          triColor = m.color;
-          triMaterial = m.material;
-          break;
-        }
+        var mm = meshb[owner];
+        triColor = mm.color;
+        triMaterial = mm.material;
       }
 
       closest.t = tempt.t;
