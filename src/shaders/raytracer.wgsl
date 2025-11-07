@@ -371,18 +371,29 @@ fn trace(r: ray, rng_state: ptr<function, u32>) -> vec3f
     // Choose material behaviour based on object_material.x
     var random_sphere = rng_next_vec3_in_unit_sphere(rng_state);
     var behaviour = material_behaviour(true, vec3f(0.0));
-    // If material.x > 0.5 treat as metal (material.y = fuzz)
+    // material.x: smoothness (if < 0 -> dielectric), material.y: absorption/fuzz, material.z: specular or refraction index
     var fuzz = rec.object_material.y;
     var specular = rec.object_material.z;
-    var metal_behaviour = metal(rec.normal, r_.direction, fuzz, random_sphere);
-    var lambertian_behaviour = lambertian(rec.normal, rec.object_material.x, random_sphere, rng_state);
 
-    behaviour.direction = mix(lambertian_behaviour.direction, metal_behaviour.direction,
-      rec.object_material.x * f32(specular > rng_next_float(rng_state)));
-    // Update attenuation
-    attenuation = attenuation * albedo;
+    if (rec.object_material.x < 0.0) {
+      // Dielectric material (transparent): choose reflection or refraction
+      // Pass the refraction index in material.z. Use object color as attenuation (colored glass).
+      behaviour = dielectric(rec.normal, r_.direction, specular, rec.frontface, random_sphere, fuzz, rng_state);
+      // For dielectrics we usually don't multiply by albedo like diffuse; use color to tint if desired
+      attenuation = attenuation * rec.object_color.xyz;
+    } else {
+      // Non-dielectric: mix lambertian and metal based on smoothness/specular
+      var metal_behaviour = metal(rec.normal, r_.direction, fuzz, random_sphere);
+      var lambertian_behaviour = lambertian(rec.normal, rec.object_material.x, random_sphere, rng_state);
 
-    r_ = ray(rec.p + rec.normal * RAY_TMIN, normalize(behaviour.direction));
+      behaviour.direction = mix(lambertian_behaviour.direction, metal_behaviour.direction,
+        rec.object_material.x * f32(specular > rng_next_float(rng_state)));
+      // Update attenuation
+      attenuation = attenuation * albedo;
+    }
+
+    // Offset ray origin slightly along the scattered direction to avoid self-intersection
+    r_ = ray(rec.p + behaviour.direction * RAY_TMIN, normalize(behaviour.direction));
   }
 
   return light;
